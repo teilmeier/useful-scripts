@@ -39,7 +39,6 @@ $aadGroupMembers = Get-AzureADGroupMember -ObjectId $aadGroup.ObjectId
 
 # Get access levels (filter for Basic users only)
 $entitlementsListUrl = "https://vsaex.dev.azure.com/$azdoOrganization/_apis/userentitlements?`$filter=licenseId eq 'Account-Express'&top=10000&api-version=5.1-preview.3"
-$entitlementsListUrl = "https://vsaex.dev.azure.com/$azdoOrganization/_apis/userentitlements?`$filter=licenseId eq 'Account-EarlyAdopter'&top=10000&api-version=5.1-preview.3"
 $entitlementsListResponse = Invoke-RestMethod -Uri $entitlementsListUrl -Method Get -ContentType "application/json" -Headers $header
 
 # Get differences
