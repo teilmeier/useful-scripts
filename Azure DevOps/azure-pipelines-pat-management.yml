@@ -1,0 +1,126 @@
+# A sample pipeline for automated Azure DevOps token management
+# Read "Manage-PAT.ps1" for prerequisites.
+
+trigger: none
+pr: none
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  TenantId: '<<GUID>>'
+  KeyVaultName: '<<NAME>>'
+  KeyVaultSecretName: 'azureDevOpsAgentPAT'
+  TokenName: 'AgentRegistration'
+  TokenScope: 'vso.agentpools_manage'
+  PatApiBase: 'https://vssps.dev.azure.com/<<OrgName>>/_apis/Tokens/Pats?api-version=6.1-preview'
+
+steps:
+- task: AzureKeyVault@1
+  displayName: 'Get clientId and AAD user credentials'
+  inputs:
+    azureSubscription: 'MSDN'
+    KeyVaultName: $(KeyVaultName)
+    SecretsFilter: 'azureDevOpsPATManagementClientId,azureDevOpsPATManagementUserName,azureDevOpsPATManagementPassword'
+    RunAsPreJob: false
+- task: PowerShell@2
+  displayName: 'Get Access Token'
+  inputs:
+    targetType: 'inline'
+    pwsh: true
+    script: |
+      
+      ####################
+      # Get Access Token using ROPC Flow
+      # https://docs.microsoft.com/en-us/azure/active-directory/develop/v2-oauth-ropc
+      
+      $tenantId = "$(TenantId)"
+      $clientId = "$(azureDevOpsPATManagementClientId)"
+      $scope = "499b84ac-1321-427f-aa17-267ca6975798/.default" # Azure DevOps (well-known - do not change)
+      $redirectUri = "https://localhost"
+      $userName = "$(azureDevOpsPATManagementUserName)"
+      $password = "$(azureDevOpsPATManagementPassword)"
+      
+      $tokenResponse = Invoke-WebRequest -Method Post -ContentType "application/x-www-form-urlencoded" -Body "client_id=$clientId&scope=$scope&username=$userName&password=$password&grant_type=password" -Uri "https://login.microsoftonline.com/$tenantId/oauth2/v2.0/token"
+      $accessToken = ($tokenResponse.Content | ConvertFrom-Json).access_token
+      Write-Host "##vso[task.setvariable variable=aadAccessToken;isSecret=true]$accessToken"
+- task: AzurePowerShell@5
+  displayName: "Retrieve PAT"
+  env:
+    aadAccessToken: $(aadAccessToken)
+  inputs:
+    azureSubscription: 'MSDN'
+    ScriptType: 'InlineScript'
+    Inline: |
+      
+      $accessTokenSecureString = (ConvertTo-SecureString -AsPlainText $env:aadAccessToken)
+
+      $secret = Get-AzKeyVaultSecret -VaultName $(KeyVaultName) -Name $(KeyVaultSecretName)
+      $authorizationId = $secret.Tags?["AuthorizationId"]
+
+      if ($authorizationId) {
+
+        ####################
+        # List PATs
+        # https://docs.microsoft.com/en-us/rest/api/azure/devops/tokens/pats/list?view=azure-devops-rest-6.1
+        $listPatsResponse = Invoke-WebRequest -Method Get -Authentication "Bearer" -Token $accessTokenSecureString -Uri "$(PatApiBase)&displayFilterOption=active"
+        $pat = ($listPatsResponse.Content | ConvertFrom-Json).patTokens | Where-Object authorizationId -eq $authorizationId
+        
+        if ($pat -and $pat.validTo -gt (Get-Date)) {
+
+          # Valid PAT found
+          Write-Host "##[command]Retrieving existing PAT"
+          $existingPat = Get-AzKeyVaultSecret -VaultName $(KeyVaultName) -Name $(KeyVaultSecretName) -AsPlainText
+          Write-Host "##vso[task.setvariable variable=pat;isSecret=true]$existingPat"
+          $patFound = $true
+
+        } else {
+          ####################
+          # Revoke PAT
+          # https://docs.microsoft.com/en-us/rest/api/azure/devops/tokens/pats/revoke?view=azure-devops-rest-6.1
+          Write-Host "##[command]Revoking expired PAT and disable secret version in Key Vault"
+          $revokePatResponse = Invoke-WebRequest -Method Delete -SkipHttpErrorCheck -Authentication "Bearer" -Token $accessTokenSecureString -Uri "$(PatApiBase)&authorizationId=$authorizationId"
+          Update-AzKeyVaultSecret -InputObject $secret -Version $secret.Version -Enable $false
+          Write-Host "##[command]Status: $($revokePatResponse.StatusCode)"
+        }
+      }
+
+      if (-not $patFound) {
+
+        ####################
+        # Create PAT
+        # https://docs.microsoft.com/en-us/rest/api/azure/devops/tokens/pats/create?view=azure-devops-rest-6.1
+        Write-Host "##[command]No valid PAT found. Creating new PAT."
+        $expiryDate = (Get-Date -AsUTC).AddHours(1)
+        $expiryDateString = $expiryDate.ToString("yyyy-MM-ddTHH:mm:ssZ")
+
+        $createPatBody = @"
+        {
+          "displayName": "$(TokenName)",
+          "scope": "$(TokenScope)",
+          "validTo": "$expiryDateString",
+          "allOrgs": true
+        }
+      "@
+
+        $createPatResponse = Invoke-WebRequest -Method Post -ContentType "application/json" -Authentication "Bearer" -Token $accessTokenSecureString -Body $createPatBody -Uri "$(PatApiBase)"
+        $newPat = ($createPatResponse.Content | ConvertFrom-Json).patToken
+        $tokenValue = $newPat.token
+        Write-Host "##[command]Status: $($createPatResponse.StatusDescription)"
+        Write-Host "##vso[task.setvariable variable=pat;isSecret=true]$tokenValue"
+
+        ####################
+        # Store PAT in KV
+        $secretValue = ConvertTo-SecureString $tokenValue -AsPlainText -Force
+        $secret = Set-AzKeyVaultSecret -VaultName "$(KeyVaultName)" -Name "$(KeyVaultSecretName)" -SecretValue $secretValue -NotBefore $newPat.validFrom -Expires $newPat.validTo -Tag @{"AuthorizationId"=$newPat.authorizationId}
+      }
+      
+    azurePowerShellVersion: 'LatestVersion'
+    pwsh: true
+  continueOnError: true
+- task: PublishPipelineArtifact@1
+  displayName: 'Store generated scripts'
+  inputs:
+    targetPath: '/home/vsts/work/_temp/'
+    artifact: 'InlineScripts'
+    publishLocation: 'pipeline'
