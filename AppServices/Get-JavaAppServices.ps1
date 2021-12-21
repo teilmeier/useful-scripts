@@ -24,7 +24,7 @@ function Get-AppServiceRuntime {
 
   $KindDetails = $Context.Kind.ToLower().Split(',')
 
-  # Use "Reserved" property istead of $KindDetails.Contains("linux")
+  # Use "Reserved" property instead of $KindDetails.Contains("linux")
   # https://azure.github.io/AppService/2021/08/31/Kind-property-overview.html
   $IsLinuxAppService = $Context.Reserved
   $IsContainerBased = $KindDetails.Contains("container")
@@ -34,7 +34,7 @@ function Get-AppServiceRuntime {
   $IsJavaAppService = $false
 
   if ($IsContainerBased -and $WarnOnContainer) {
-    # No automatic recognition fo runtime inside container
+    # No automatic recognition of runtime inside container
     $OutputMessage = "Warning: Check for Java Runtime inside container manually"
     
   }
